@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   ComposedChart, Scatter, Line, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -99,25 +99,37 @@ function RatePill({ rate, prs }) {
   );
 }
 
+// Renders the same content as hover tooltip for a company (used for click-to-select)
+function CompanyTipContent({ company, devs, prs, source }) {
+  const rate = (prs / devs).toFixed(1);
+  return (
+    <div style={TIP}>
+      <div style={TIP_TITLE}>{company}</div>
+      <TipRow label="Developers"  val={devs.toLocaleString()} color="#38bdf8" />
+      <TipRow label="PRs / month" val={prs.toLocaleString()}  color="#a78bfa" />
+      <RatePill rate={rate} prs={prs} />
+      {source && (
+        <div style={{ marginTop: 8, fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace" }}>
+          Source: {source}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TooltipBox({ active, payload }) {
   if (!active || !payload?.length) return null;
   const first = payload[0]?.payload;
 
   // Scatter point
   if (first?.company) {
-    const rate = (first.prs / first.devs).toFixed(1);
     return (
-      <div style={TIP}>
-        <div style={TIP_TITLE}>{first.company}</div>
-        <TipRow label="Developers"  val={first.devs.toLocaleString()} color="#38bdf8" />
-        <TipRow label="PRs / month" val={first.prs.toLocaleString()}  color="#a78bfa" />
-        <RatePill rate={rate} prs={first.prs} />
-        {first.source && (
-          <div style={{ marginTop: 8, fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace" }}>
-            Source: {first.source}
-          </div>
-        )}
-      </div>
+      <CompanyTipContent
+        company={first.company}
+        devs={first.devs}
+        prs={first.prs}
+        source={first.source}
+      />
     );
   }
 
@@ -155,6 +167,8 @@ export default function PRModel() {
   const [showBands,   setShowBands]   = useState(true);
   const [inputVal,    setInputVal]    = useState("");
   const [customDevs,  setCustomDevs]  = useState(null);
+  const [highlightedCompany, setHighlightedCompany] = useState(null);
+  const chartContainerRef = useRef(null);
 
   const handleInput = (e) => {
     const raw = e.target.value.replace(/[^0-9]/g, "");
@@ -280,11 +294,24 @@ export default function PRModel() {
       </div>
 
       {/* Chart */}
-      <div style={{
-        maxWidth: 900, margin: "0 auto 28px",
-        background: "rgba(15,23,42,.6)", border: "1px solid #1e293b",
-        borderRadius: 16, padding: "24px 12px 16px",
-      }}>
+      <div
+        ref={chartContainerRef}
+        style={{
+          maxWidth: 900, margin: "0 auto 28px",
+          background: "rgba(15,23,42,.6)", border: "1px solid #1e293b",
+          borderRadius: 16, padding: "24px 12px 16px",
+          position: "relative",
+        }}
+      >
+        {highlightedCompany && (() => {
+          const anchor = ANCHORS.find((p) => p.company === highlightedCompany);
+          if (!anchor) return null;
+          return (
+            <div style={{ position: "absolute", top: 20, right: 24, zIndex: 10 }}>
+              <CompanyTipContent company={anchor.company} devs={anchor.devs} prs={anchor.prs} source={anchor.source} />
+            </div>
+          );
+        })()}
         <ResponsiveContainer width="100%" height={480}>
           <ComposedChart margin={{ top: 36, right: 30, bottom: 44, left: 64 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -337,7 +364,22 @@ export default function PRModel() {
                   devs: p.devs, prs: p.prs, company: p.company, tier: p.tier, source: p.source,
                 }))}
                 dataKey="prs"
-                fill={color} opacity={0.9} r={7}
+                fill={color}
+                opacity={0.9}
+                shape={(props) => {
+                  const { cx, cy, payload } = props;
+                  const isHighlighted = payload?.company === highlightedCompany;
+                  return (
+                    <g key={payload?.company ?? `${cx}-${cy}`}>
+                      {isHighlighted && (
+                        <circle cx={cx} cy={cy} r={14} fill="none" stroke="#f8fafc" strokeWidth={2} opacity={0.9}>
+                          <animate attributeName="r" values="10;14;10" dur="1.5s" repeatCount="indefinite" />
+                        </circle>
+                      )}
+                      <circle cx={cx} cy={cy} r={isHighlighted ? 10 : 7} fill={color} opacity={isHighlighted ? 1 : 0.9} stroke={isHighlighted ? "#f8fafc" : "none"} strokeWidth={isHighlighted ? 2.5 : 0} />
+                    </g>
+                  );
+                }}
               />
             ))}
 
@@ -381,21 +423,33 @@ export default function PRModel() {
         </ResponsiveContainer>
       </div>
 
-      {/* Legend pills */}
+      {/* Legend pills — click to scroll to point on graph */}
       {showAnchors && (
         <div style={{ maxWidth: 900, margin: "0 auto 24px", display: "flex", flexWrap: "wrap", gap: 8 }}>
           {ANCHORS.map((p) => (
-            <div key={p.company} style={{
-              display: "flex", alignItems: "center", gap: 6,
-              background: "rgba(15,23,42,.6)", border: "1px solid #1e293b",
-              borderRadius: 8, padding: "5px 11px",
-              fontSize: 11, fontFamily: "'DM Mono',monospace",
-            }}>
+            <button
+              key={p.company}
+              type="button"
+              className="tbtn"
+              onClick={() => {
+                setHighlightedCompany(p.company);
+                chartContainerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+                setTimeout(() => setHighlightedCompany(null), 2500);
+              }}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                background: highlightedCompany === p.company ? "rgba(99,102,241,.2)" : "rgba(15,23,42,.6)",
+                border: `1px solid ${highlightedCompany === p.company ? "#6366f1" : "#1e293b"}`,
+                borderRadius: 8, padding: "5px 11px",
+                fontSize: 11, fontFamily: "'DM Mono',monospace",
+                cursor: "pointer", color: "inherit", textAlign: "left",
+              }}
+            >
               <div style={{ width: 7, height: 7, borderRadius: "50%", background: TIER_COLORS[p.tier] }} />
               <span style={{ color: "#cbd5e1" }}>{p.company}</span>
               <span style={{ color: "#475569" }}>~{(p.prs/1000).toFixed(1)}k PRs</span>
               <span style={{ color: "#334155", fontSize: 10 }}>· {p.source}</span>
-            </div>
+            </button>
           ))}
         </div>
       )}
