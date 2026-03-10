@@ -286,7 +286,7 @@ export default function PRModel() {
         borderRadius: 16, padding: "24px 12px 16px",
       }}>
         <ResponsiveContainer width="100%" height={480}>
-          <ComposedChart margin={{ top: 10, right: 30, bottom: 44, left: 64 }}>
+          <ComposedChart margin={{ top: 36, right: 30, bottom: 44, left: 64 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
 
             <XAxis
