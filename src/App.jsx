@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import {
   ComposedChart, Scatter, Line, ReferenceLine,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -6,37 +6,60 @@ import {
 } from "recharts";
 
 // ── Model ─────────────────────────────────────────────────────────────────────
-const BASE_RATES = { low: 7.5, median: 12.4, high: 18.0 };
-const DRAG_COEFF = 0.085;
+// PR throughput per developer, calibrated to Worklytics 2025 percentiles
+// (PRs merged / engineer / month): 25th 8.2 · 50th 12.4 · 75th 18.7 · 90th 26.3.
+// Median of 12.4 is independently confirmed by Swarmia 2025 (6.1M PRs).
+const BASE_RATES = { low: 8.2, median: 12.4, high: 18.7 };
+const ELITE_RATE = 26.3;            // 90th percentile — Worklytics 2025
+const DRAG_COEFF = 0.085;           // coordination drag per 10× headcount
+// AI output lift is highly tier-skewed (CircleCI 2026, 28M CI workflows):
+// bottom 25% saw no measurable YoY change · median teams +4% (and −7% on main
+// branch) · top 25% +25% · top 10% +47% · top 5% +97%. The flat "+16% sustained"
+// from DORA / Faros telemetry is an industry average that masks this fanning.
+const AI_UPLIFT_BY_BAND = { low: 0.00, median: 0.04, high: 0.25 };
+// Merge success rate on main branch fell to 70.8% in 2025 (CircleCI 2026),
+// down from a 90%+ historical benchmark — 30% of merge attempts now fail and
+// re-enter the review queue, multiplying effective review load by ~1.41×.
+// Surfaced as a stat card; not folded into the chart axis (which is merged PRs).
 
 function rateAtN(base, N) {
   const drag = 1 - DRAG_COEFF * Math.log10(Math.max(N, 10) / 10);
   return base * Math.max(drag, 0.72);
 }
-function prsAtN(base, N) { return Math.round(N * rateAtN(base, N)); }
+function prsAtN(base, N, uplift = 0) {
+  return Math.round(N * rateAtN(base, N) * (1 + uplift));
+}
 
 const HEADCOUNTS = [10, 25, 50, 100, 200, 374, 500, 755, 880, 1200, 1900, 2400, 3000, 4000, 5000, 6000, 8000];
 
-// Band lines: x = devs, y = prs
-const bandData = HEADCOUNTS.map((N) => ({
+// Band lines: x = devs, y = prs. Recomputed when AI uplift toggles on/off.
+// When `ai` is true, each band gets its own tier-skewed lift (CircleCI 2026).
+const makeBandData = (ai) => HEADCOUNTS.map((N) => ({
   devs: N,
-  high:   prsAtN(BASE_RATES.high,   N),
-  median: prsAtN(BASE_RATES.median, N),
-  low:    prsAtN(BASE_RATES.low,    N),
+  high:   prsAtN(BASE_RATES.high,   N, ai ? AI_UPLIFT_BY_BAND.high   : 0),
+  median: prsAtN(BASE_RATES.median, N, ai ? AI_UPLIFT_BY_BAND.median : 0),
+  low:    prsAtN(BASE_RATES.low,    N, ai ? AI_UPLIFT_BY_BAND.low    : 0),
 }));
 
-// Dev counts updated to real sourced data (2024/2025)
-const ANCHORS = [
-  { company: "Notion (374)",    devs: 374,  prs: prsAtN(12.4, 374),  tier: "Mid-scale",       source: "Unify 2024" },
-  { company: "Figma (755)",     devs: 755,  prs: prsAtN(12.4, 755),  tier: "Growth-scale",    source: "Unify / SEC S-1 2024" },
-  { company: "Brex (~380)",     devs: 380,  prs: prsAtN(12.4, 380),  tier: "Mid-scale",       source: "Post-layoff est. 2024" },
-  { company: "Lyft (~880)",     devs: 880,  prs: prsAtN(12.4, 880),  tier: "Pre-enterprise",  source: "SEC 10-K 2024 (2,934 total × 30%)" },
-  { company: "Coinbase (~1200)",devs: 1200, prs: prsAtN(12.4, 1200), tier: "Pre-enterprise",  source: "Est. ~3,400 total × 35%" },
-  { company: "Airbnb (1900)",   devs: 1900, prs: prsAtN(12.4, 1900), tier: "Enterprise",      source: "Airbnb direct disclosure 2024" },
-  { company: "DoorDash (2400)", devs: 2400, prs: prsAtN(12.4, 2400), tier: "Enterprise",      source: "Unify 2024" },
-  { company: "Stripe (~3000)",  devs: 3000, prs: prsAtN(12.4, 3000), tier: "Large enterprise",source: "8,000 total × ~38% eng" },
-  { company: "Uber (~8000)",    devs: 8000, prs: prsAtN(12.4, 8000), tier: "Hyperscale",      source: "31,100 total × ~25% eng" },
+// Dev counts from real sourced data (2024/2025); PR volume modelled at the
+// median rate so anchors sit on the median band (and shift with AI uplift).
+const ANCHOR_DEFS = [
+  { company: "Notion (374)",    devs: 374,  tier: "Mid-scale",       source: "Unify 2024" },
+  { company: "Figma (755)",     devs: 755,  tier: "Growth-scale",    source: "Unify / SEC S-1 2024" },
+  { company: "Brex (~380)",     devs: 380,  tier: "Mid-scale",       source: "Post-layoff est. 2024" },
+  { company: "Lyft (~880)",     devs: 880,  tier: "Pre-enterprise",  source: "SEC 10-K 2024 (2,934 total × 30%)" },
+  { company: "Coinbase (~1200)",devs: 1200, tier: "Pre-enterprise",  source: "Est. ~3,400 total × 35%" },
+  { company: "Airbnb (1900)",   devs: 1900, tier: "Enterprise",      source: "Airbnb direct disclosure 2024" },
+  { company: "DoorDash (2400)", devs: 2400, tier: "Enterprise",      source: "Unify 2024" },
+  { company: "Stripe (~3000)",  devs: 3000, tier: "Large enterprise",source: "8,000 total × ~38% eng" },
+  { company: "Uber (~8000)",    devs: 8000, tier: "Hyperscale",      source: "31,100 total × ~25% eng" },
 ];
+// Anchors sit on the median band; with AI on, they shift by the median band's lift.
+const makeAnchors = (ai) =>
+  ANCHOR_DEFS.map((a) => ({
+    ...a,
+    prs: prsAtN(BASE_RATES.median, a.devs, ai ? AI_UPLIFT_BY_BAND.median : 0),
+  }));
 
 const TIER_COLORS = {
   "Mid-scale":        "#38bdf8",
@@ -73,29 +96,16 @@ function TipRow({ label, val, color }) {
   );
 }
 
-function RatePill({ rate, prs }) {
-  const cost = prs != null ? `$${(prs * 25).toLocaleString()}` : null;
+function RatePill({ rate }) {
   return (
-    <>
-      <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ color: "#64748b" }}>PRs / dev / mo</span>
-        <span style={{
-          color: "#f8fafc", fontWeight: 700, fontSize: 16,
-          background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.45)",
-          borderRadius: 5, padding: "2px 9px",
-        }}>{rate}</span>
-      </div>
-      {cost && (
-        <div style={{ marginTop: 5, paddingTop: 5, borderTop: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ color: "#64748b" }}>Code review cost / mo</span>
-          <span style={{
-            color: "#fbbf24", fontWeight: 700, fontSize: 14,
-            background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.35)",
-            borderRadius: 5, padding: "2px 9px",
-          }}>{cost}</span>
-        </div>
-      )}
-    </>
+    <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid #1e293b", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <span style={{ color: "#64748b" }}>PRs / dev / mo</span>
+      <span style={{
+        color: "#f8fafc", fontWeight: 700, fontSize: 16,
+        background: "rgba(99,102,241,0.2)", border: "1px solid rgba(99,102,241,0.45)",
+        borderRadius: 5, padding: "2px 9px",
+      }}>{rate}</span>
+    </div>
   );
 }
 
@@ -107,7 +117,7 @@ function CompanyTipContent({ company, devs, prs, source }) {
       <div style={TIP_TITLE}>{company}</div>
       <TipRow label="Developers"  val={devs.toLocaleString()} color="#38bdf8" />
       <TipRow label="PRs / month" val={prs.toLocaleString()}  color="#a78bfa" />
-      <RatePill rate={rate} prs={prs} />
+      <RatePill rate={rate} />
       {source && (
         <div style={{ marginTop: 8, fontSize: 10, color: "#475569", fontFamily: "'DM Mono',monospace" }}>
           Source: {source}
@@ -154,7 +164,7 @@ function TooltipBox({ active, payload }) {
         <div key={label} style={{ marginBottom: 10 }}>
           <div style={{ color, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>{label}</div>
           <TipRow label="PRs / month" val={prs.toLocaleString()} color={color} />
-          <RatePill rate={rate} prs={prs} />
+          <RatePill rate={rate} />
         </div>
       ))}
     </div>
@@ -165,10 +175,14 @@ function TooltipBox({ active, payload }) {
 export default function PRModel() {
   const [showAnchors, setShowAnchors] = useState(true);
   const [showBands,   setShowBands]   = useState(true);
+  const [aiUplift,    setAiUplift]    = useState(false);
   const [inputVal,    setInputVal]    = useState("");
   const [customDevs,  setCustomDevs]  = useState(null);
   const [highlightedCompany, setHighlightedCompany] = useState(null);
   const chartContainerRef = useRef(null);
+
+  const bandData = useMemo(() => makeBandData(aiUplift), [aiUplift]);
+  const anchors  = useMemo(() => makeAnchors(aiUplift),  [aiUplift]);
 
   const handleInput = (e) => {
     const raw = e.target.value.replace(/[^0-9]/g, "");
@@ -177,9 +191,10 @@ export default function PRModel() {
     setCustomDevs(!isNaN(n) && n > 0 ? Math.min(n, 50000) : null);
   };
 
-  const customLow    = customDevs ? prsAtN(BASE_RATES.low,    customDevs) : null;
-  const customMedian = customDevs ? prsAtN(BASE_RATES.median, customDevs) : null;
-  const customHigh   = customDevs ? prsAtN(BASE_RATES.high,   customDevs) : null;
+  const liftFor = (band) => aiUplift ? AI_UPLIFT_BY_BAND[band] : 0;
+  const customLow    = customDevs ? prsAtN(BASE_RATES.low,    customDevs, liftFor("low"))    : null;
+  const customMedian = customDevs ? prsAtN(BASE_RATES.median, customDevs, liftFor("median")) : null;
+  const customHigh   = customDevs ? prsAtN(BASE_RATES.high,   customDevs, liftFor("high"))   : null;
 
   return (
     <div style={{
@@ -200,15 +215,15 @@ export default function PRModel() {
           border: "1px solid rgba(99,102,241,.3)", borderRadius: 6,
           padding: "4px 12px", fontSize: 11, fontFamily: "'DM Mono',monospace",
           color: "#818cf8", letterSpacing: ".1em", marginBottom: 12, textTransform: "uppercase",
-        }}>Statistical Model · v1.1</div>
+        }}>Statistical Model · v2.1</div>
         <h1 style={{ fontSize: 26, fontWeight: 700, margin: "0 0 8px", color: "#f8fafc", letterSpacing: "-.5px" }}>
           Monthly PRs vs. Engineering Headcount
         </h1>
         <p style={{ fontSize: 13, color: "#94a3b8", margin: 0, lineHeight: 1.7 }}>
-          <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, fontFamily: "'DM Mono',monospace", fontSize: 11 }}>PRs = N × r(N)</code>
+          <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, fontFamily: "'DM Mono',monospace", fontSize: 11 }}>PRs = N × r(N) × (1 + AI_band)</code>
           {"  ·  "}
           <code style={{ background: "#1e293b", padding: "2px 6px", borderRadius: 4, fontFamily: "'DM Mono',monospace", fontSize: 11 }}>r(N) = base × (1 − 0.085 × log₁₀(N/10))</code>
-          <br />Sources: Swarmia 2025 · LinearB 8.1M PR Study · GitHub Octoverse 2025
+          <br />Sources: Worklytics 2025 · CircleCI 2026 (28M workflows) · DORA 2025 / Faros · Atlassian DevEx 2025 · Jellyfish · Swarmia 2025
         </p>
       </div>
 
@@ -217,6 +232,7 @@ export default function PRModel() {
         {[
           { label: "Performance bands", val: showBands,   set: setShowBands },
           { label: "Company anchors",   val: showAnchors, set: setShowAnchors },
+          { label: "AI uplift (tier-skewed)", val: aiUplift, set: setAiUplift },
         ].map(({ label, val, set }) => (
           <button key={label} className="tbtn" onClick={() => set(!val)} style={{
             background: val ? "rgba(99,102,241,.2)" : "rgba(255,255,255,.05)",
@@ -304,7 +320,7 @@ export default function PRModel() {
         }}
       >
         {highlightedCompany && (() => {
-          const anchor = ANCHORS.find((p) => p.company === highlightedCompany);
+          const anchor = anchors.find((p) => p.company === highlightedCompany);
           if (!anchor) return null;
           return (
             <div style={{ position: "absolute", top: 20, right: 24, zIndex: 10 }}>
@@ -360,7 +376,7 @@ export default function PRModel() {
             {showAnchors && Object.entries(TIER_COLORS).map(([tier, color]) => (
               <Scatter
                 key={tier} name={tier}
-                data={ANCHORS.filter((p) => p.tier === tier).map((p) => ({
+                data={anchors.filter((p) => p.tier === tier).map((p) => ({
                   devs: p.devs, prs: p.prs, company: p.company, tier: p.tier, source: p.source,
                 }))}
                 dataKey="prs"
@@ -426,7 +442,7 @@ export default function PRModel() {
       {/* Legend pills — click to scroll to point on graph */}
       {showAnchors && (
         <div style={{ maxWidth: 900, margin: "0 auto 24px", display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {ANCHORS.map((p) => (
+          {anchors.map((p) => (
             <button
               key={p.company}
               type="button"
@@ -455,11 +471,11 @@ export default function PRModel() {
       )}
 
       {/* Stat cards */}
-      <div style={{ maxWidth: 900, margin: "0 auto 24px", display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
+      <div style={{ maxWidth: 900, margin: "0 auto 24px", display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12 }}>
         {[
-          { label: "Median rate",       value: "12.4", unit: "PRs / dev / mo",      sub: "Swarmia 2025, 6.1M PRs",     color: "#818cf8" },
-          { label: "Elite rate",        value: "18+",  unit: "PRs / dev / mo",      sub: "Top quartile performers",    color: "#22d3ee" },
-          { label: "Coordination drag", value: "8.5%", unit: "per decade of scale", sub: "per 10× headcount increase", color: "#fb923c" },
+          { label: "Median rate",       value: "12.4",     unit: "PRs / dev / mo",       sub: "Worklytics 2025 (50th pct) · Swarmia 6.1M PRs",  color: "#818cf8" },
+          { label: "Elite rate",        value: "26.3",     unit: "PRs / dev / mo",       sub: "Worklytics 2025, 90th percentile",               color: "#22d3ee" },
+          { label: "AI uplift (top/median/low)", value: "+25 / +4 / 0%", unit: "tier-skewed YoY", sub: "CircleCI 2026, 28M CI workflows",      color: "#34d399" },
         ].map(({ label, value, unit, sub, color }) => (
           <div key={label} style={{
             background: "rgba(15,23,42,.6)", border: "1px solid #1e293b",
@@ -481,12 +497,12 @@ export default function PRModel() {
         fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#64748b", lineHeight: 1.9,
       }}>
         <span style={{ color: "#818cf8" }}>MODEL</span>{"  "}
-        PRs/month = N × r(N){"  "}|{"  "}
+        PRs/month = N × r(N) × (1 + AI_band){"  "}|{"  "}
         <span style={{ color: "#22d3ee" }}>r(N) = base × (1 − 0.085 × log₁₀(N/10))</span>
-        {"  "}|{"  "}bases: low=7.5 · median=12.4 · high=18.0
+        {"  "}|{"  "}bases: low=8.2 · median=12.4 · high=18.7{"  "}|{"  "}AI: low 0% · median +4% · high +25%
         <br />
         <span style={{ color: "#818cf8" }}>SOURCES</span>{"  "}
-        Swarmia 2025 (6.1M PRs) · LinearB 2026 (8.1M PRs, 4,800 teams) · GitHub Octoverse 2025 (43.2M PRs/mo)
+        Worklytics 2025 (PR/eng/mo percentiles) · CircleCI 2026 State of Software Delivery (tier-skewed AI uplift, 70.8% merge success, 28M workflows) · DORA 2025 / Faros telemetry (industry-avg +16% per dev) · Atlassian DevEx 2025 (3,500 devs, 84% time outside IDE) · Graphite commit-frequency study · Jellyfish (78k engineers, 11k teams) · GitLab DevSecOps · Swarmia 2025 (6.1M PRs)
       </div>
     </div>
   );
